@@ -36,7 +36,6 @@ except ImportError as exc:  # pragma: no cover - environment guard
         "缺少依赖 pypdf，请先安装：pip install pypdf"
     ) from exc
 
-
 # 导入 get_content_vl 模块中的 get_write_text 方法
 try:
     from set_config import get_write_text
@@ -47,6 +46,9 @@ except ImportError:
 
 STOP_MARKERS = ("交清增额", "交清保额","健康加费","交清增额费率表","交清增额保险费率表","交清保额费率表","交清保额的净保险费表")
 LARGE_TABLE_HEADING_RE = re.compile(r"[（(]([^）)]*对应的[^）)]*)[）)]")
+PLAN_HEADING_RE = re.compile(
+    r"(?P<title>[^\n]*表)\s*\n\s*[（(](?P<plan>计划[一二三四五六七八九十两0-9]+)[，,](?P<desc>[^）)]*)[）)]"
+)
 PAYMENT_RE = re.compile(
     r"(?:趸\s*交|趸\s*缴|一次(?:性)?(?:交纳|缴纳|交清|交付|支付)|(?:[0-9０-９]+|[一二三四五六七八九十两]+)\s*年\s*(?:交|缴|期)?)"
 )
@@ -80,13 +82,30 @@ def fullwidth_to_halfwidth(text: str) -> str:
             chars.append(" ")
         elif 0xFF10 <= code <= 0xFF19:
             chars.append(chr(code - 0xFF10 + ord("0")))
+        elif 0x13 <= code <= 0x1C:
+            # Some embedded-font PDFs expose digits as C0 control codepoints
+            # offset by 0x13: "\x13\x14\x15" means "012".
+            chars.append(str(code - 0x13))
         else:
             chars.append(char)
     return "".join(chars)
 
 
 def normalize_space(text: str) -> str:
-    return re.sub(r"[ \t]+", " ", fullwidth_to_halfwidth(text)).strip()
+    text = fullwidth_to_halfwidth(text)
+    replacements = {
+        "ᒤ": "年",
+        "⭧": "男",
+        "ྣ": "女",
+        "Ӕ": "交",
+        "䍩": "费",
+        "ᵏ": "期",
+        "䰤": "间",
+        "喴": "龄",
+    }
+    for source, target in replacements.items():
+        text = text.replace(source, target)
+    return re.sub(r"[ \t]+", " ", text).strip()
 
 
 def chinese_number_to_int(text: str) -> int | None:
@@ -333,7 +352,27 @@ def extract_insured_counts(text: str) -> list[str]:
 
 
 def extract_payments(line: str) -> list[str]:
-    return [normalize_payment_period(item) for item in PAYMENT_RE.findall(line)]
+    payments = [normalize_payment_period(item) for item in PAYMENT_RE.findall(line)]
+
+    normalized = normalize_space(line)
+    tokens = normalized.split()
+    digit_year_tokens = [
+        token
+        for token in tokens
+        if re.search(r"\d+\s*年", token)
+    ]
+    if not digit_year_tokens:
+        return payments
+
+    inferred: list[str] = []
+    for token in tokens:
+        if re.search(r"\d+\s*年", token):
+            inferred.append(normalize_payment_period(token))
+        elif token.endswith("交") and not re.search(r"\d", token):
+            inferred.append("一次性交纳")
+    if len(inferred) > len(payments):
+        return inferred
+    return payments
 
 
 def extract_genders(line: str) -> list[str]:
@@ -348,9 +387,28 @@ def looks_like_data_row(line: str) -> bool:
     return 0 <= age <= 120 and len(extract_numbers(match.group(2))) >= 2
 
 
+def age_only_value(line: str) -> str | None:
+    normalized = fullwidth_to_halfwidth(normalize_space(line))
+    if not re.fullmatch(r"[0-9]{1,3}", normalized):
+        return None
+    age = int(normalized)
+    if 0 <= age <= 120:
+        return str(age)
+    return None
+
+
+def line_starts_with_valid_age(line: str) -> bool:
+    match = AGE_RE.match(line)
+    if not match:
+        return False
+    return is_integer_age_token(fullwidth_to_halfwidth(match.group(1)))
+
+
 def find_first_data_row(lines: Sequence[str]) -> int:
     for index, line in enumerate(lines):
         if looks_like_data_row(line):
+            return index
+        if age_only_value(line) is not None and index + 1 < len(lines) and len(extract_numbers(lines[index + 1])) >= 2:
             return index
     raise ValueError("未找到年龄数据起始行。")
 
@@ -399,8 +457,6 @@ def infer_source_columns(header_lines: list[str], expected_values: int) -> list[
             payment_tokens.extend(line_payments)
 
         line_genders = extract_genders(line)
-        # print('line_genders=======',line_genders)
-        has_gender_sections(line_genders)
         if line_genders:
             gender_tokens.extend(line_genders)
             compact_line = line.replace(" ", "")
@@ -480,10 +536,6 @@ def infer_source_columns(header_lines: list[str], expected_values: int) -> list[
         f"数据列 {expected_values} 个。"
     )
 
-
-def has_gender_sections(text: str) -> bool:
-    # print('text=======',text)
-    return  True
 
 def parse_single_gender_sections(lines: list[str]) -> RateTable | None:
     parsed_from_reordered = parse_title_trailing_gender_sections(lines)
@@ -747,6 +799,24 @@ def iter_data_rows(lines: list[str], start_index: int, expected_values: int) -> 
         if not line:
             continue
         if "交费期间" in line or "投保年龄" in line or "性别" in line:
+            continue
+
+        age_only = age_only_value(line)
+        if age_only is not None:
+            completed = flush_row(allow_incomplete=True)
+            if completed:
+                yield completed
+            pending_age = age_only
+            pending_values = []
+            continue
+
+        if pending_age is not None and is_numeric_continuation(line) and not line_starts_with_valid_age(line):
+            pending_values.extend(extract_numbers(line))
+            completed = flush_row()
+            if completed:
+                yield completed
+                pending_age = None
+                pending_values = []
             continue
 
         match = AGE_RE.match(line)
@@ -1112,6 +1182,55 @@ def parse_multi_insurance_period_pdf(pdf_path: Path) -> RateTable | None:
     return RateTable(columns=[], rows=[], sections=sections, section_label="保险期间")
 
 
+def normalize_plan_signature(title: str, description: str) -> tuple[str, str]:
+    return normalize_space(title), normalize_space(description)
+
+
+def plan_heading_matches(text: str) -> list[re.Match[str]]:
+    return list(PLAN_HEADING_RE.finditer(text))
+
+
+def parse_multi_plan_pdf(pdf_path: Path) -> RateTable | None:
+    reader = open_pdf_reader(pdf_path)
+    grouped_sections: dict[tuple[str, str], list[tuple[str, list[str]]]] = {}
+    current_signature: tuple[str, str] | None = None
+
+    for page in reader.pages:
+        page_text = page.extract_text() or ""
+        matches = plan_heading_matches(page_text)
+        if matches:
+            match = matches[0]
+            signature = normalize_plan_signature(match.group("title"), match.group("desc"))
+            plan = normalize_space(match.group("plan"))
+            grouped_sections.setdefault(signature, []).append((plan, [page_text]))
+            current_signature = signature
+            continue
+
+        if current_signature and grouped_sections.get(current_signature):
+            grouped_sections[current_signature][-1][1].append(page_text)
+
+    for _signature, sections_by_plan in grouped_sections.items():
+        unique_plans = unique_in_order(plan for plan, _ in sections_by_plan)
+        if len(unique_plans) < 2:
+            continue
+
+        sections: list[RateTable] = []
+        for plan, page_texts in sections_by_plan:
+            section = parse_rate_table("\n".join(page_texts), allow_section_parsers=False)
+            sections.append(
+                RateTable(
+                    columns=section.columns,
+                    rows=section.rows,
+                    insurance_period=plan,
+                )
+            )
+
+        if sections:
+            return RateTable(columns=[], rows=[], sections=sections, section_label="投保计划")
+
+    return None
+
+
 def parse_insured_count_pdf(pdf_path: Path) -> RateTable | None:
     horizontal = parse_horizontal_insured_count_pdf(pdf_path)
     if horizontal is not None:
@@ -1244,7 +1363,13 @@ def parse_rate_table(text: str, allow_section_parsers: bool = True) -> RateTable
             return single_gender_table
 
     first_data_index = find_first_data_row(lines)
-    first_data_numbers = extract_numbers(AGE_RE.match(lines[first_data_index]).group(2))  # type: ignore[union-attr]
+    first_data_match = AGE_RE.match(lines[first_data_index])
+    if first_data_match:
+        first_data_numbers = extract_numbers(first_data_match.group(2))
+    elif first_data_index + 1 < len(lines):
+        first_data_numbers = extract_numbers(lines[first_data_index + 1])
+    else:
+        first_data_numbers = []
     header_lines = collect_header_candidates(lines)
     expected_values = infer_expected_values(header_lines, first_data_numbers)
     columns = infer_source_columns(header_lines, expected_values)
@@ -1656,10 +1781,11 @@ def convert(pdf_path: Path, output_path: Path) -> RateTable:
     # 给获取set_config.py 函数   用的
     get_write_text(text, pdf_filename=str(pdf_path))
     try:
+        plan_table = parse_multi_plan_pdf(pdf_path)
         insurance_period_table = parse_multi_insurance_period_pdf(pdf_path) if has_insurance_period(text) else None
         insured_count_table = parse_insured_count_pdf(pdf_path) if extract_insured_count(text) else None
-        table = insurance_period_table or insured_count_table or parse_rate_table(text)
-        if insurance_period_table is None and insured_count_table is None:
+        table = plan_table or insurance_period_table or insured_count_table or parse_rate_table(text)
+        if plan_table is None and insurance_period_table is None and insured_count_table is None:
             table = improve_table_with_fitz_word_rows(pdf_path, table)
     except Exception:
         image_table = parse_ocr_script_rate_table(pdf_path)
