@@ -456,7 +456,7 @@ def infer_source_columns(header_lines: list[str], expected_values: int) -> list[
 
 
 def has_gender_sections(text: str) -> bool:
-    print('text=======',text)
+    # print('text=======',text)
     return  True
 
 def parse_single_gender_sections(lines: list[str]) -> RateTable | None:
@@ -1587,10 +1587,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     return parser.parse_args(argv)
 
-
+# 生成Excel用完即删
 def _process_one(pdf_path: Path) -> int:
-    """处理单个 PDF：生成 txt + xlsx，返回 0 表示成功。"""
-    output_path = pdf_path.with_suffix(".txt")
+    """处理单个 PDF：生成 xlsx（txt 为临时中间文件，用完即删），返回 0 表示成功。"""
+    # txt 写到临时文件，xlsx 生成后自动清除
+    tmp_txt = tempfile.NamedTemporaryFile(
+        suffix=".txt", dir=pdf_path.parent, delete=False,
+    )
+    tmp_txt.close()
+    output_path = Path(tmp_txt.name)
+    excel_path = pdf_path.with_suffix(".xlsx")
 
     if not pdf_path.exists():
         print(f"输入 PDF 不存在：{pdf_path}", file=sys.stderr)
@@ -1600,6 +1606,7 @@ def _process_one(pdf_path: Path) -> int:
         table = convert(pdf_path, output_path)
     except Exception as exc:
         print(f"转换失败：{exc}", file=sys.stderr)
+        output_path.unlink(missing_ok=True)
         return 1
 
     num_rows = (
@@ -1610,17 +1617,54 @@ def _process_one(pdf_path: Path) -> int:
         len(table.sections[0].columns)
         if table.sections else len(table.columns)
     )
-    print(f"转换完成：{output_path} ({num_rows} 行，{num_cols} 个数据列)")
+    print(f"转换完成：{excel_path} ({num_rows} 行，{num_cols} 个数据列)")
 
     # ── 自动生成 Excel ────────────────────────────────────────────────────────
     try:
         from set_excel import create_config_sheet
-        excel_path = output_path.with_suffix(".xlsx")
         create_config_sheet(output_path=excel_path, txt_path=output_path)
     except Exception as exc:
         print(f"⚠️ Excel 生成失败：{exc}", file=sys.stderr)
+    finally:
+        output_path.unlink(missing_ok=True)
 
     return 0
+
+
+# # 保留txt文件的生成
+# def _process_one(pdf_path: Path) -> int:
+#     """处理单个 PDF：生成 txt + xlsx，返回 0 表示成功。"""
+#     output_path = pdf_path.with_suffix(".txt")
+#
+#     if not pdf_path.exists():
+#         print(f"输入 PDF 不存在：{pdf_path}", file=sys.stderr)
+#         return 2
+#
+#     try:
+#         table = convert(pdf_path, output_path)
+#     except Exception as exc:
+#         print(f"转换失败：{exc}", file=sys.stderr)
+#         return 1
+#
+#     num_rows = (
+#         sum(len(section.rows) for section in table.sections)
+#         if table.sections else len(table.rows)
+#     )
+#     num_cols = (
+#         len(table.sections[0].columns)
+#         if table.sections else len(table.columns)
+#     )
+#     print(f"转换完成：{output_path} ({num_rows} 行，{num_cols} 个数据列)")
+#
+#     # ── 自动生成 Excel ────────────────────────────────────────────────────────
+#     try:
+#         from set_excel import create_config_sheet
+#         excel_path = output_path.with_suffix(".xlsx")
+#         create_config_sheet(output_path=excel_path, txt_path=output_path)
+#     except Exception as exc:
+#         print(f"⚠️ Excel 生成失败：{exc}", file=sys.stderr)
+#
+#     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1628,15 +1672,30 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.pdf is not None:
         # ── 单文件模式 ────────────────────────────────────────────────────────
-        output_path = args.output or args.pdf.with_suffix(".txt")
         pdf_path = args.pdf
         if not pdf_path.exists():
             print(f"输入 PDF 不存在：{pdf_path}", file=sys.stderr)
             return 2
+
+        # txt 写到临时文件（用户指定 -o 时保留，否则用完即删）
+        if args.output:
+            output_path = args.output
+            cleanup_txt = False
+        else:
+            tmp_txt = tempfile.NamedTemporaryFile(
+                suffix=".txt", dir=pdf_path.parent, delete=False,
+            )
+            tmp_txt.close()
+            output_path = Path(tmp_txt.name)
+            cleanup_txt = True
+
+        excel_path = pdf_path.with_suffix(".xlsx")
         try:
             table = convert(pdf_path, output_path)
         except Exception as exc:
             print(f"转换失败：{exc}", file=sys.stderr)
+            if cleanup_txt:
+                output_path.unlink(missing_ok=True)
             return 1
         num_rows = (
             sum(len(section.rows) for section in table.sections)
@@ -1646,13 +1705,15 @@ def main(argv: list[str] | None = None) -> int:
             len(table.sections[0].columns)
             if table.sections else len(table.columns)
         )
-        print(f"转换完成：{output_path} ({num_rows} 行，{num_cols} 个数据列)")
+        print(f"转换完成：{excel_path} ({num_rows} 行，{num_cols} 个数据列)")
         try:
             from set_excel import create_config_sheet
-            excel_path = output_path.with_suffix(".xlsx")
             create_config_sheet(output_path=excel_path, txt_path=output_path)
         except Exception as exc:
             print(f"⚠️ Excel 生成失败：{exc}", file=sys.stderr)
+        finally:
+            if cleanup_txt:
+                output_path.unlink(missing_ok=True)
         return 0
 
     # ── 批量模式：自动扫描 stare/ 目录 ────────────────────────────────────────
