@@ -9,7 +9,8 @@ Output format:
     0,9391,9395,...
 
 The parser detects payment periods and gender columns from the PDF text. When
-the source contains "交清增额", that section and everything after it is ignored.
+the source contains surrender/paid-up amount sections such as "交清增额" or
+"交清保额", that section and everything after it is ignored.
 """
 
 from __future__ import annotations
@@ -42,8 +43,7 @@ except ImportError:
     # 如果导入失败，使用本地定义的方法
     pass
 
-
-STOP_MARKER = "交清增额"
+STOP_MARKERS = ("交清增额", "交清保额","健康加费","交清增额费率表","交清增额保险费率表","交清保额费率表","交清保额的净保险费表")
 PAYMENT_RE = re.compile(
     r"(?:趸\s*交|趸\s*缴|一次(?:性)?(?:交纳|缴纳|交清|交付|支付)|(?:[0-9０-９]+|[一二三四五六七八九十两]+)\s*年\s*(?:交|缴|期)?)"
 )
@@ -226,18 +226,27 @@ def read_pdf_text(pdf_path: Path) -> str:
     reader = open_pdf_reader(pdf_path)
     page_texts = []
     for page in reader.pages:
-        page_texts.append(page.extract_text() or "")
-    text = "\n".join(page_texts)
-    stop_at = text.find(STOP_MARKER)
-    if stop_at != -1:
-        text = text[:stop_at]
-    return text
+        page_text = page.extract_text() or ""
+        stop_positions = [
+            position
+            for marker in STOP_MARKERS
+            if (position := page_text.find(marker)) != -1
+        ]
+        if stop_positions:
+            page_texts.append(page_text[: min(stop_positions)])
+            break
+        page_texts.append(page_text)
+    return "\n".join(page_texts)
 
 
 def normalize_period_value(value: str) -> str:
     value = normalize_space(value)
     if value == "终身":
         return value
+    age_match = re.match(r"至?\s*([0-9]+|[一二三四五六七八九十两]+)\s*周岁", value)
+    if age_match:
+        number = chinese_number_to_int(age_match.group(1))
+        return f"至{number}周岁" if number is not None else value.replace(" ", "")
     number_match = re.match(r"([0-9]+|[一二三四五六七八九十两]+)年", value)
     if not number_match:
         return value
@@ -246,7 +255,10 @@ def normalize_period_value(value: str) -> str:
 
 
 def extract_insurance_period(text: str) -> str | None:
-    match = re.search(r"保险期间\s*[:：]?\s*(终身|[0-9０-９一二三四五六七八九十两]+年)", text)
+    match = re.search(
+        r"保险期间\s*[:：]?\s*((?:至\s*)?[0-9０-９一二三四五六七八九十两]+\s*周岁|终身|[0-9０-９一二三四五六七八九十两]+年)",
+        text,
+    )
     if not match:
         return None
     return normalize_period_value(match.group(1))
@@ -355,15 +367,26 @@ def infer_source_columns(header_lines: list[str], expected_values: int) -> list[
     gender_group_tokens: list[str] = []
 
     for line in header_lines:
+        payments_seen_before = bool(payment_tokens)
         line_payments = extract_payments(line)
         if line_payments:
             payment_tokens.extend(line_payments)
 
         line_genders = extract_genders(line)
-        print('line_genders=========',line_genders)
+        # print('line_genders=======',line_genders)
+        has_gender_sections(line_genders)
         if line_genders:
             gender_tokens.extend(line_genders)
-            if ("性别" in line or set(line.replace(" ", "")) <= {"男", "女", "性", "别"}) and len(line_genders) < expected_values:
+            compact_line = line.replace(" ", "")
+            if (
+                (
+                    "性别" in line
+                    or "投保年龄" in line
+                    or set(compact_line) <= {"男", "女", "性", "别"}
+                    or (len(line_genders) >= 2 and not line_payments and not payments_seen_before)
+                )
+                and len(line_genders) < expected_values
+            ):
                 gender_group_tokens.extend(line_genders)
 
     payment_tokens = [item for item in payment_tokens if item]
@@ -431,6 +454,10 @@ def infer_source_columns(header_lines: list[str], expected_values: int) -> list[
         f"数据列 {expected_values} 个。"
     )
 
+
+def has_gender_sections(text: str) -> bool:
+    print('text=======',text)
+    return  True
 
 def parse_single_gender_sections(lines: list[str]) -> RateTable | None:
     parsed_from_reordered = parse_title_trailing_gender_sections(lines)
@@ -958,6 +985,36 @@ def parse_insurance_period_pdf(pdf_path: Path) -> RateTable:
     return RateTable(columns=[], rows=[], sections=sections)
 
 
+def parse_multi_insurance_period_pdf(pdf_path: Path) -> RateTable | None:
+    reader = open_pdf_reader(pdf_path)
+    sections_by_period: list[tuple[str, list[str]]] = []
+
+    for page in reader.pages:
+        page_text = page.extract_text() or ""
+        insurance_period = extract_insurance_period(page_text)
+        if insurance_period is not None:
+            sections_by_period.append((insurance_period, [page_text]))
+        elif sections_by_period:
+            sections_by_period[-1][1].append(page_text)
+
+    unique_periods = unique_in_order(period for period, _ in sections_by_period)
+    if len(unique_periods) < 2:
+        return None
+
+    sections: list[RateTable] = []
+    for insurance_period, page_texts in sections_by_period:
+        section = parse_rate_table("\n".join(page_texts), allow_section_parsers=False)
+        sections.append(
+            RateTable(
+                columns=section.columns,
+                rows=section.rows,
+                insurance_period=insurance_period,
+            )
+        )
+
+    return RateTable(columns=[], rows=[], sections=sections, section_label="保险期间")
+
+
 def parse_insured_count_pdf(pdf_path: Path) -> RateTable | None:
     horizontal = parse_horizontal_insured_count_pdf(pdf_path)
     if horizontal is not None:
@@ -1004,10 +1061,6 @@ def split_values_for_groups(values: list[str], group_count: int, group_width: in
         for group_index in range(group_count):
             start = group_index * group_width
             groups[group_index] = values[start : start + group_width]
-        return groups
-
-    if len(values) <= group_count:
-        groups[0][: min(len(values), group_width)] = values[:group_width]
         return groups
 
     base_count, extra_count = divmod(len(values), group_count)
@@ -1503,8 +1556,12 @@ def write_txt(rows: list[list[str]], output_path: Path) -> None:
 
 def convert(pdf_path: Path, output_path: Path) -> RateTable:
     text = read_pdf_text(pdf_path)
+    # 给获取set_config.py 函数   用的
+    get_write_text(text, pdf_filename=str(pdf_path))
     try:
-        table = parse_insured_count_pdf(pdf_path) or parse_rate_table(text)
+        insurance_period_table = parse_multi_insurance_period_pdf(pdf_path) if has_insurance_period(text) else None
+        insured_count_table = parse_insured_count_pdf(pdf_path) if extract_insured_count(text) else None
+        table = insurance_period_table or insured_count_table or parse_rate_table(text)
     except Exception:
         image_table = parse_ocr_script_rate_table(pdf_path)
         if image_table is not None:
