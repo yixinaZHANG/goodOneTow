@@ -36,6 +36,7 @@ except ImportError as exc:  # pragma: no cover - environment guard
         "缺少依赖 pypdf，请先安装：pip install pypdf"
     ) from exc
 
+
 # 导入 get_content_vl 模块中的 get_write_text 方法
 try:
     from set_config import get_write_text
@@ -43,7 +44,9 @@ except ImportError:
     # 如果导入失败，使用本地定义的方法
     pass
 
+
 STOP_MARKERS = ("交清增额", "交清保额","健康加费","交清增额费率表","交清增额保险费率表","交清保额费率表","交清保额的净保险费表")
+LARGE_TABLE_HEADING_RE = re.compile(r"[（(]([^）)]*对应的[^）)]*)[）)]")
 PAYMENT_RE = re.compile(
     r"(?:趸\s*交|趸\s*缴|一次(?:性)?(?:交纳|缴纳|交清|交付|支付)|(?:[0-9０-９]+|[一二三四五六七八九十两]+)\s*年\s*(?:交|缴|期)?)"
 )
@@ -159,6 +162,13 @@ def title_gender(line: str) -> str | None:
     return None
 
 
+def age_header_gender(line: str) -> str | None:
+    genders = unique_in_order(extract_genders(line))
+    if len(genders) == 1 and "年龄" in line and not extract_payments(line):
+        return genders[0]
+    return None
+
+
 def unique_in_order(items: Iterable[str]) -> list[str]:
     seen = set()
     result = []
@@ -236,7 +246,23 @@ def read_pdf_text(pdf_path: Path) -> str:
             page_texts.append(page_text[: min(stop_positions)])
             break
         page_texts.append(page_text)
-    return "\n".join(page_texts)
+    return select_preferred_large_table_text("\n".join(page_texts))
+
+
+def select_preferred_large_table_text(text: str) -> str:
+    headings = list(LARGE_TABLE_HEADING_RE.finditer(text))
+    if len(headings) < 2:
+        return text
+
+    for index, heading in enumerate(headings):
+        title = normalize_space(heading.group(1))
+        _, _, target = title.partition("对应的")
+        if "保险金额" not in target or "保险费" in target:
+            continue
+        section_end = headings[index + 1].start() if index + 1 < len(headings) else len(text)
+        return text[heading.start() : section_end]
+
+    return text
 
 
 def normalize_period_value(value: str) -> str:
@@ -470,7 +496,7 @@ def parse_single_gender_sections(lines: list[str]) -> RateTable | None:
     payment_order: list[str] = []
 
     for line in lines:
-        gender = single_gender_line(line) or title_gender(line)
+        gender = single_gender_line(line) or title_gender(line) or age_header_gender(line)
         if gender:
             current_gender = gender
             current_payments = []
@@ -557,7 +583,7 @@ def parse_single_gender_sections_without_reorder(lines: list[str]) -> RateTable 
     payment_order: list[str] = []
 
     for line in lines:
-        gender = single_gender_line(line) or title_gender(line)
+        gender = single_gender_line(line) or title_gender(line) or age_header_gender(line)
         if gender:
             current_gender = gender
             current_payments = []
@@ -666,11 +692,27 @@ def split_age_entries(line: str, expected_values: int) -> list[list[str]]:
 
         next_age_index: int | None = None
         candidate = index + expected_values + 1
-        if candidate < len(numbers) and is_integer_age_token(numbers[candidate]):
+        if candidate + 1 < len(numbers) and is_integer_age_token(numbers[candidate]):
             next_age_index = candidate
+        else:
+            current_age = int(float(age_token))
+            for possible_next in range(index + 1, min(len(numbers), index + expected_values + 1)):
+                if (
+                    possible_next + 1 < len(numbers)
+                    and is_integer_age_token(numbers[possible_next])
+                    and int(float(numbers[possible_next])) == current_age + 1
+                ):
+                    next_age_index = possible_next
+                    break
 
         end_index = next_age_index if next_age_index is not None else len(numbers)
         values = numbers[index + 1 : end_index]
+        normalized_age = str(int(float(age_token)))
+        values = [
+            value
+            for value in values
+            if not (is_integer_age_token(value) and str(int(float(value))) == normalized_age)
+        ]
         if values:
             entries.append([str(int(float(age_token))), *values])
 
@@ -867,6 +909,61 @@ def first_unique_age_table(raw_rows: list[list[str]]) -> list[list[str]]:
         seen_ages.add(age)
         table_rows.append(row)
     return sorted(table_rows, key=lambda row: int(row[0]))
+
+
+def parse_fitz_word_rows(pdf_path: Path, expected_values: int) -> list[list[str]]:
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        return []
+
+    document = fitz.open(str(pdf_path))
+    raw_rows: list[list[str]] = []
+    for page in document:
+        words = page.get_text("words")
+        row_groups: list[list[tuple[float, float, str]]] = []
+        for word in sorted(words, key=lambda item: (item[1], item[0])):
+            x0, y0, _x1, _y1, text, *_ = word
+            value = normalize_space(str(text))
+            if not value:
+                continue
+            for group in row_groups:
+                if abs(group[0][0] - y0) <= 3.0:
+                    group.append((y0, x0, value))
+                    break
+            else:
+                row_groups.append([(y0, x0, value)])
+
+        for group in row_groups:
+            line = normalize_space(" ".join(value for _y, _x, value in sorted(group, key=lambda item: item[1])))
+            if not AGE_RE.match(line):
+                continue
+            raw_rows.extend(split_age_entries(line, expected_values))
+    return raw_rows
+
+
+def improve_table_with_fitz_word_rows(pdf_path: Path, table: RateTable) -> RateTable:
+    if table.sections or not table.columns or not table.rows:
+        return table
+
+    raw_rows = parse_fitz_word_rows(pdf_path, len(table.columns))
+    if not raw_rows:
+        return table
+
+    candidate_rows = align_rows(first_unique_age_table(raw_rows), table.columns)
+    if not candidate_rows:
+        return table
+
+    current_max_age = max(int(row[0]) for row in table.rows)
+    candidate_max_age = max(int(row[0]) for row in candidate_rows)
+    if candidate_max_age <= current_max_age or len(candidate_rows) <= len(table.rows):
+        return table
+
+    return RateTable(
+        columns=table.columns,
+        rows=candidate_rows,
+        insurance_period=table.insurance_period,
+    )
 
 
 @dataclass(frozen=True)
@@ -1562,6 +1659,8 @@ def convert(pdf_path: Path, output_path: Path) -> RateTable:
         insurance_period_table = parse_multi_insurance_period_pdf(pdf_path) if has_insurance_period(text) else None
         insured_count_table = parse_insured_count_pdf(pdf_path) if extract_insured_count(text) else None
         table = insurance_period_table or insured_count_table or parse_rate_table(text)
+        if insurance_period_table is None and insured_count_table is None:
+            table = improve_table_with_fitz_word_rows(pdf_path, table)
     except Exception:
         image_table = parse_ocr_script_rate_table(pdf_path)
         if image_table is not None:
