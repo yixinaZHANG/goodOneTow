@@ -360,6 +360,7 @@ def infer_source_columns(header_lines: list[str], expected_values: int) -> list[
             payment_tokens.extend(line_payments)
 
         line_genders = extract_genders(line)
+        print('line_genders=========',line_genders)
         if line_genders:
             gender_tokens.extend(line_genders)
             if ("性别" in line or set(line.replace(" ", "")) <= {"男", "女", "性", "别"}) and len(line_genders) < expected_values:
