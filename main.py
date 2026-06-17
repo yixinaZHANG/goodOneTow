@@ -991,7 +991,7 @@ def parse_insured_count_pdf(pdf_path: Path) -> RateTable | None:
             )
         )
 
-    return RateTable(columns=[], rows=[], sections=sections, section_label="保险期间")
+    return RateTable(columns=[], rows=[], sections=sections, section_label="投保计划")
 
 
 def split_values_for_groups(values: list[str], group_count: int, group_width: int) -> list[list[str]]:
@@ -1080,7 +1080,7 @@ def parse_horizontal_insured_count_pdf(pdf_path: Path) -> RateTable | None:
 
     if len(sections) < 2:
         return None
-    return RateTable(columns=[], rows=[], sections=sections, section_label="保险期间")
+    return RateTable(columns=[], rows=[], sections=sections, section_label="投保计划")
 
 
 def parse_rate_table(text: str, allow_section_parsers: bool = True) -> RateTable:
@@ -1502,9 +1502,16 @@ def write_txt(rows: list[list[str]], output_path: Path) -> None:
 
 def convert(pdf_path: Path, output_path: Path) -> RateTable:
     text = read_pdf_text(pdf_path)
-    get_write_text(text, pdf_filename=str(pdf_path))
-
-    table = parse_insurance_period_pdf(pdf_path) if has_insurance_period(text) else parse_rate_table(text, pdf_path)
+    try:
+        table = parse_insured_count_pdf(pdf_path) or parse_rate_table(text)
+    except Exception:
+        image_table = parse_ocr_script_rate_table(pdf_path)
+        if image_table is not None:
+            table = image_table
+        else:
+            if not has_insurance_period(text):
+                raise
+            table = parse_insurance_period_pdf(pdf_path)
     write_txt(build_output_rows(table), output_path)
     return table
 
