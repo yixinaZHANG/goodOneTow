@@ -80,9 +80,9 @@ def _find_header(headers: list[tuple[str, list[str]]], key: str) -> list[str] | 
 
 def _normalize_payment(period: str) -> str:
     """将交费期间格式化为 'x年'（去掉末尾的 交/缴/期），'一次交清' 保持不变。"""
-    if period == "一次交清":
-        return period
     import re
+    if re.match(r"^一次[性]?[交缴][纳清]$", period):
+        return "一次交清"
     return re.sub(r"(年)(?:交|缴|期)$", r"\1", period)
 
 
