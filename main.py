@@ -105,6 +105,8 @@ def normalize_space(text: str) -> str:
         "ᵏ": "期",
         "䰤": "间",
         "喴": "龄",
+        "\x11": ".",  # CID字体中小数点编码为0x11
+        "\r": "*",  # CID字体中乘号编码为0x0D
     }
     for source, target in replacements.items():
         text = text.replace(source, target)
@@ -269,6 +271,49 @@ def read_pdf_text(pdf_path: Path) -> str:
             break
         page_texts.append(page_text)
     return select_preferred_large_table_text("\n".join(page_texts))
+
+
+def read_pdf_content(pdf_path: Path) -> str:
+    """从 PDF 文件中提取所有页的文本内容（使用 fitz/PyMuPDF）。
+    遇到 STOP_MARKERS（如"交清增额"、"交清保额"等）时截断，
+    跳过标记后的表格数据。供 set_config.get_write_text 提取配置信息。
+    """
+    try:
+        import fitz  # PyMuPDF
+        document = fitz.open(str(pdf_path))
+        pages_text: list[str] = []
+        for page in document:
+            page_text = page.get_text("text") or ""
+            normalized = normalize_space(page_text)
+            stop_positions = [
+                pos
+                for marker in STOP_MARKERS
+                if (pos := normalized.find(marker)) != -1
+            ]
+            if stop_positions:
+                pages_text.append(normalized[: min(stop_positions)])
+                break
+            pages_text.append(normalized)
+        document.close()
+        get_write_text("\n".join(pages_text), pdf_filename=pdf_path.name)
+
+    except ImportError:
+        reader = open_pdf_reader(pdf_path)
+        pages_text = []
+        for page in reader.pages:
+            page_text = page.extract_text() or ""
+            normalized = normalize_space(page_text)
+            stop_positions = [
+                pos
+                for marker in STOP_MARKERS
+                if (pos := normalized.find(marker)) != -1
+            ]
+            if stop_positions:
+                pages_text.append(normalized[: min(stop_positions)])
+                break
+            pages_text.append(normalized)
+        # 提取 PDF 全文，传给 set_config.get_write_text 提取配置信息（计费单位、月/季/半年缴基数等）
+        get_write_text("\n".join(pages_text), pdf_filename=pdf_path.name)
 
 
 def select_preferred_large_table_text(text: str) -> str:
@@ -1781,8 +1826,7 @@ def write_txt(rows: list[list[str]], output_path: Path) -> None:
 
 def convert(pdf_path: Path, output_path: Path) -> RateTable:
     text = read_pdf_text(pdf_path)
-    # 给获取set_config.py 函数   用的
-    get_write_text(text, pdf_filename=str(pdf_path))
+    read_pdf_content(pdf_path)
     try:
         plan_table = parse_multi_plan_pdf(pdf_path)
         insurance_period_table = parse_multi_insurance_period_pdf(pdf_path) if has_insurance_period(text) else None
