@@ -22,7 +22,7 @@ except ImportError:
 
 def parse_rate_txt(txt_path: Path) -> dict | None:
     """
-    解析 1.py 生成的费率表 txt 文件，支持多 section（被保险人数分段）。
+    解析 1.py 生成的费率表 txt 文件，支持多 section（多被保人分段）。
 
     返回结构:
         {
@@ -105,7 +105,7 @@ def fill_rate_sheet(ws, txt_path: Path) -> bool:
         - 否则纵向堆叠
 
     每个 section 的 header 行顺序：
-        保险期间（无则"终身"）→ 交费期间 → 投保计划（被保险人数）→ 性别
+        保险期间（无则"终身"）→ 交费期间 → 投保计划（多被保人）→ 性别
     """
     parsed = parse_rate_txt(txt_path)
     if parsed is None or not parsed["sections"]:
@@ -191,10 +191,10 @@ def fill_rate_sheet(ws, txt_path: Path) -> bool:
             write_row(current_row, ["交费期间"] + pp_vals)
             current_row += 1
 
-        # 投保计划（兼容"被保险人数"和"投保计划"两种表头）
+        # 投保计划（兼容"多被保人"和"投保计划"两种表头）
         ni_vals = []
         for sec in sections:
-            v = _find_header(sec["headers"], "被保险人数")
+            v = _find_header(sec["headers"], "多被保人")
             if v is None:
                 v = _find_header(sec["headers"], "投保计划")
             if v is not None:
@@ -238,7 +238,7 @@ def fill_rate_sheet(ws, txt_path: Path) -> bool:
 
             insurance_periods = _find_header(headers, "保险期间")
             payment_periods   = _find_header(headers, "投保年龄|交费期间")
-            num_insured       = _find_header(headers, "被保险人数")
+            num_insured       = _find_header(headers, "多被保人")
             plan_vals         = _find_header(headers, "投保计划")
             genders           = _find_header(headers, "性别")
 
@@ -264,7 +264,7 @@ def fill_rate_sheet(ws, txt_path: Path) -> bool:
             if num_insured is not None:
                 write_row(current_row, ["投保计划"] + [_format_sub_group(v) for v in num_insured])
                 current_row += 1
-                handled.add("被保险人数")
+                handled.add("多被保人")
             elif plan_vals is not None:
                 write_row(current_row, ["投保计划"] + list(plan_vals))
                 current_row += 1
@@ -350,12 +350,12 @@ def create_config_sheet(output_path=None, txt_path=None):
     def safe_get(key, default=''):
         return config_info.get(key, default) if config_info else default
 
-    # 根据 txt 表头是否含有"被保险人数"或"投保计划"动态设置 start_row 和 config_params
+    # 根据 txt 表头是否含有"多被保人"或"投保计划"动态设置 start_row 和 config_params
     has_sub_dimension = False
     if txt_path is not None:
         try:
             txt_content = Path(txt_path).read_text(encoding='utf-8')
-            has_sub_dimension = '被保险人数' in txt_content or '投保计划' in txt_content
+            has_sub_dimension = '多被保人' in txt_content or '投保计划' in txt_content
         except Exception:
             pass
 

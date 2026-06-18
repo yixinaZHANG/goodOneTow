@@ -349,7 +349,7 @@ def normalize_period_value(value: str) -> str:
 
 def extract_insurance_period(text: str) -> str | None:
     match = re.search(
-        r"保险期间\s*[:：]?\s*((?:至\s*)?[0-9０-９一二三四五六七八九十两]+\s*周岁|终身|[0-9０-９一二三四五六七八九十两]+年)",
+        r"(?:保险|保障)期间\s*[:：]?\s*((?:至\s*)?[0-9０-９一二三四五六七八九十两]+\s*周岁|终身|[0-9０-９一二三四五六七八九十两]+年)",
         text,
     )
     if not match:
@@ -497,6 +497,7 @@ def infer_source_columns(header_lines: list[str], expected_values: int) -> list[
     payment_tokens: list[str] = []
     gender_tokens: list[str] = []
     gender_group_tokens: list[str] = []
+    title_gender_group_tokens: list[str] = []
 
     for line in header_lines:
         payments_seen_before = bool(payment_tokens)
@@ -518,11 +519,21 @@ def infer_source_columns(header_lines: list[str], expected_values: int) -> list[
                 and len(line_genders) < expected_values
             ):
                 gender_group_tokens.extend(line_genders)
+            if (
+                len(line_genders) >= 2
+                and len(line_genders) < expected_values
+                and "投保年龄" not in line
+                and ("保险费" in line or "保险金额" in line)
+            ):
+                title_gender_group_tokens.extend(line_genders)
 
     payment_tokens = [item for item in payment_tokens if item]
     unique_payments = canonical_payment_order(payment_tokens)
     unique_genders = unique_in_order(gender_tokens)
     group_genders = unique_in_order(gender_group_tokens)
+    title_group_genders = unique_in_order(title_gender_group_tokens)
+    if not group_genders and title_group_genders:
+        group_genders = title_group_genders
 
     if not unique_payments:
         raise ValueError("未识别到缴费期间。")
@@ -1230,6 +1241,81 @@ def parse_multi_insurance_period_pdf(pdf_path: Path) -> RateTable | None:
     return RateTable(columns=[], rows=[], sections=sections, section_label="保险期间")
 
 
+def extract_responsibility(text: str) -> str | None:
+    for line in text.splitlines():
+        normalized = normalize_space(line)
+        match = re.search(r"(?:保险|保障)责任\s*[:：]\s*(.+)", normalized)
+        if match:
+            return match.group(1).strip()
+    return None
+
+
+def fitz_page_text_by_rows(page) -> str:
+    words = page.get_text("words")
+    row_groups: list[list[tuple[float, float, str]]] = []
+    for word in sorted(words, key=lambda item: (item[1], item[0])):
+        x0, y0, _x1, _y1, text, *_ = word
+        value = normalize_space(str(text))
+        if not value:
+            continue
+        for group in row_groups:
+            if abs(group[0][0] - y0) <= 3.0:
+                group.append((y0, x0, value))
+                break
+        else:
+            row_groups.append([(y0, x0, value)])
+    return "\n".join(
+        normalize_space(" ".join(value for _y, _x, value in sorted(group, key=lambda item: item[1])))
+        for group in row_groups
+    )
+
+
+def fitz_pages_text_by_rows(pdf_path: Path) -> list[str]:
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        return []
+
+    try:
+        document = fitz.open(str(pdf_path))
+    except Exception:
+        return []
+    return [fitz_page_text_by_rows(page) for page in document]
+
+
+def parse_responsibility_pdf(pdf_path: Path) -> RateTable | None:
+    reader = open_pdf_reader(pdf_path)
+    pypdf_texts = [page.extract_text() or "" for page in reader.pages]
+    fitz_texts = fitz_pages_text_by_rows(pdf_path)
+    sections_by_value: list[tuple[str, list[str]]] = []
+
+    for index, page_text in enumerate(pypdf_texts):
+        fitz_text = fitz_texts[index] if index < len(fitz_texts) else ""
+        responsibility = extract_responsibility(page_text) or extract_responsibility(fitz_text)
+        table_text = fitz_text if fitz_text and extract_responsibility(fitz_text) else page_text
+        if responsibility:
+            sections_by_value.append((responsibility, [table_text]))
+        elif sections_by_value:
+            sections_by_value[-1][1].append(table_text)
+
+    unique_values = unique_in_order(value for value, _ in sections_by_value)
+    if len(unique_values) < 2:
+        return None
+
+    sections: list[RateTable] = []
+    for value, page_texts in sections_by_value:
+        section = parse_rate_table("\n".join(page_texts), allow_section_parsers=False)
+        sections.append(
+            RateTable(
+                columns=section.columns,
+                rows=section.rows,
+                insurance_period=value,
+            )
+        )
+
+    return RateTable(columns=[], rows=[], sections=sections, section_label="可选责任")
+
+
 def normalize_plan_signature(title: str, description: str) -> tuple[str, str]:
     return normalize_space(title), normalize_space(description)
 
@@ -1313,7 +1399,7 @@ def parse_insured_count_pdf(pdf_path: Path) -> RateTable | None:
             )
         )
 
-    return RateTable(columns=[], rows=[], sections=sections, section_label="投保计划")
+    return RateTable(columns=[], rows=[], sections=sections, section_label="多被保人")
 
 
 def split_values_for_groups(values: list[str], group_count: int, group_width: int) -> list[list[str]]:
@@ -1398,7 +1484,7 @@ def parse_horizontal_insured_count_pdf(pdf_path: Path) -> RateTable | None:
 
     if len(sections) < 2:
         return None
-    return RateTable(columns=[], rows=[], sections=sections, section_label="投保计划")
+    return RateTable(columns=[], rows=[], sections=sections, section_label="多被保人")
 
 
 def parse_rate_table(text: str, allow_section_parsers: bool = True) -> RateTable:
@@ -1430,7 +1516,11 @@ def parse_rate_table(text: str, allow_section_parsers: bool = True) -> RateTable
     if not rows:
         raise ValueError("未识别到年龄数据行。")
 
-    return RateTable(columns=columns, rows=rows, insurance_period=extract_insurance_period(text))
+    return RateTable(
+        columns=columns,
+        rows=rows,
+        insurance_period=extract_insurance_period(text),
+    )
 
 
 def common_payment_periods(count: int) -> list[str]:
@@ -1829,10 +1919,11 @@ def convert(pdf_path: Path, output_path: Path) -> RateTable:
     read_pdf_content(pdf_path)
     try:
         plan_table = parse_multi_plan_pdf(pdf_path)
+        responsibility_table = parse_responsibility_pdf(pdf_path)
         insurance_period_table = parse_multi_insurance_period_pdf(pdf_path) if has_insurance_period(text) else None
         insured_count_table = parse_insured_count_pdf(pdf_path) if extract_insured_count(text) else None
-        table = plan_table or insurance_period_table or insured_count_table or parse_rate_table(text)
-        if plan_table is None and insurance_period_table is None and insured_count_table is None:
+        table = plan_table or responsibility_table or insurance_period_table or insured_count_table or parse_rate_table(text)
+        if plan_table is None and responsibility_table is None and insurance_period_table is None and insured_count_table is None:
             table = improve_table_with_fitz_word_rows(pdf_path, table)
     except Exception:
         image_table = parse_ocr_script_rate_table(pdf_path)
