@@ -266,8 +266,6 @@ def read_pdf_text(pdf_path: Path) -> str:
         page_text = page.extract_text() or ""
         if page_index < len(fitz_texts):
             page_text = merge_page_text(page_text, fitz_texts[page_index])
-        else:
-            page_text = merge_page_text(page_text, read_pdf_text_with_pypdf_visitor(page))
         stop_positions = [
             position
             for marker in STOP_MARKERS
@@ -278,20 +276,6 @@ def read_pdf_text(pdf_path: Path) -> str:
             break
         page_texts.append(page_text)
     return select_preferred_large_table_text("\n".join(page_texts))
-
-
-def read_pdf_text_with_pypdf_visitor(page) -> str:
-    items: list[str] = []
-
-    def visitor(text, cm, tm, font, size) -> None:
-        if text:
-            items.append(text)
-
-    try:
-        page.extract_text(visitor_text=visitor)
-    except Exception:
-        return ""
-    return "".join(items)
 
 
 def read_pdf_text_with_fitz(pdf_path: Path) -> list[str]:

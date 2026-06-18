@@ -1,4 +1,4 @@
-#获取textval 的数据,然后在这里打印出来
+# 获取textval 的数据,然后在这里打印出来
 
 from pathlib import Path
 
@@ -71,31 +71,15 @@ def _lookup_product(pdf_filename: str) -> tuple[str, str]:
 
     return stem, ""
 
-def _normalize_text(text: str) -> str:
-    text = text.replace('㌵', '月')
-    text = text.replace('䍩', '费')
-    text = text.replace('Ӕ', '交')
-    text = text.replace('ᒤ', '年')
-    text = text.replace('⌘', '注')
-    text = text.replace('˖', '：')
-    text = text.replace('؍', '保')
-    text = text.replace('㑥', '保')
-    text = text.replace('䰤', '间')
-    text = text.replace('喴', '龄')
-    text = text.replace('⭧', '男')
-    text = text.replace('ྣ', '女')
-    text = text.replace('ᴸ', '月')
-    return text
 
 def get_write_text(textval, pdf_filename=None) -> None:
     # textval数据 给get_content_vl.py 也页面数据用的
     # print('===text222=======', textval)
-    
+
     import re
-    textval = _normalize_text(textval)
-    
+
     calculation_unit = '1000'  # 默认值
-    
+
     # 定义匹配模式列表（按优先级排序）
     patterns = [
         r'每[0-9,，]+元保险费',
@@ -107,14 +91,14 @@ def get_write_text(textval, pdf_filename=None) -> None:
         r'年交保险费：[0-9,，]+元',
         r'每万[元]?基本保险金额',  # 匹配 "每万元基本保险金额"
     ]
-    
+
     # 遍历所有模式，找到第一个匹配
     for pattern in patterns:
         match = re.search(pattern, textval)
         if match:
             matched_text = match.group(0)
             print(f'匹配到: {matched_text}')
-            
+
             # 从匹配的文本中提取数字
             number_match = re.search(r'[0-9,，]+', matched_text)
             if number_match:
@@ -135,20 +119,19 @@ def get_write_text(textval, pdf_filename=None) -> None:
         # 如果没有匹配到任何模式，使用默认值
         print(f'未匹配到模式，使用默认值 calculation_unit={calculation_unit}')
 
-
     # payment_bases = {'月缴基数': '', '季缴基数': '', '半年缴基数': ''}  # 默认值
     payment_bases = {'月缴基数': '', '季缴基数': '', '半年缴基数': ''}  # 默认值
-    
+
     # 匹配月缴基数
     month_patterns = [
-        r'月交保险费\s*[=＝]\s*([0-9.]+)\s*[*＊×xX]\s*年交保险费',
-        r'月交保费\s*[=＝]\s*([0-9.]+)\s*[*＊×xX]\s*年交保费',
-        r'月交保险费\s*[=＝]\s*年交保险费\s*[*＊×xX]\s*([0-9.]+)',
-        r'月交保费\s*[=＝]\s*年交保费\s*[*＊×xX]\s*([0-9.]+)',
-        r'月交保险费\s*[=＝]\s*([0-9.]+)\s*[*＊×xX]\s*年化保险费',
-        r'月交保费\s*[=＝]\s*([0-9.]+)\s*[*＊×xX]\s*年化保费',
-        r'月交保险费\s*[=＝]\s*年化保险费\s*[*＊×xX]\s*([0-9.]+)',
-        r'月交保费\s*[=＝]\s*年化保费\s*[*＊×xX]\s*([0-9.]+)',
+        r'月交保险费[=＝]\s*([0-9.]+)\s*[*×xX]\s*年交保险费',
+        r'月交保费[=＝]\s*([0-9.]+)\s*[*×xX]\s*年交保费',
+        r'月交保险费[=＝]\s*年交保险费[*×xX]\s*([0-9.]+)',
+        r'月交保费[=＝]\s*年交保费[*×xX]\s*([0-9.]+)',
+        r'月交保险费[=＝]\s*([0-9.]+)\s*[*×xX]\s*年化保险费',
+        r'月交保费[=＝]\s*([0-9.]+)\s*[*×xX]\s*年化保费',
+        r'月交保险费[=＝]\s*年化保险费[*×xX]\s*([0-9.]+)',
+        r'月交保费[=＝]\s*年化保费[*×xX]\s*([0-9.]+)',
         r'月交[0-9,，]+元保险费对应的基本保险金额[=＝]\s*年交[0-9,，]+元保险费对应的基本保险金额\s*÷\s*([0-9.]+)',
         r'月交[0-9,，]+元保险费对应的基本保险金额[=＝]\s*年交[0-9,，]+元保险费对应的基本保险金额([0-9.]+)',
     ]
@@ -161,14 +144,14 @@ def get_write_text(textval, pdf_filename=None) -> None:
 
     # 匹配季缴基数
     quarter_patterns = [
-        r'季交保险费\s*[=＝]\s*([0-9.]+)\s*[*＊×xX]\s*年交保险费',
-        r'季交保费\s*[=＝]\s*([0-9.]+)\s*[*＊×xX]\s*年交保费',
-        r'季交保险费\s*[=＝]\s*年交保险费\s*[*＊×xX]\s*([0-9.]+)',
-        r'季交保费\s*[=＝]\s*年交保费\s*[*＊×xX]\s*([0-9.]+)',
-        r'季交保险费\s*[=＝]\s*([0-9.]+)\s*[*＊×xX]\s*年化保险费',
-        r'季交保费\s*[=＝]\s*([0-9.]+)\s*[*＊×xX]\s*年化保费',
-        r'季交保险费\s*[=＝]\s*年化保险费\s*[*＊×xX]\s*([0-9.]+)',
-        r'季交保费\s*[=＝]\s*年化保费\s*[*＊×xX]\s*([0-9.]+)',
+        r'季交保险费[=＝]\s*([0-9.]+)\s*[*×xX]\s*年交保险费',
+        r'季交保费[=＝]\s*([0-9.]+)\s*[*×xX]\s*年交保费',
+        r'季交保险费[=＝]\s*年交保险费[*×xX]\s*([0-9.]+)',
+        r'季交保费[=＝]\s*年交保费[*×xX]\s*([0-9.]+)',
+        r'季交保险费[=＝]\s*([0-9.]+)\s*[*×xX]\s*年化保险费',
+        r'季交保费[=＝]\s*([0-9.]+)\s*[*×xX]\s*年化保费',
+        r'季交保险费[=＝]\s*年化保险费[*×xX]\s*([0-9.]+)',
+        r'季交保费[=＝]\s*年化保费[*×xX]\s*([0-9.]+)',
         r'季交[0-9,，]+元保险费对应的基本保险金额[=＝]\s*年交[0-9,，]+元保险费对应的基本保险金额\s*÷\s*([0-9.]+)',
         r'季交[0-9,，]+元保险费对应的基本保险金额[=＝]\s*年交[0-9,，]+元保险费对应的基本保险金额([0-9.]+)',
     ]
@@ -181,14 +164,14 @@ def get_write_text(textval, pdf_filename=None) -> None:
 
     # 匹配半年缴基数
     half_year_patterns = [
-        r'半年交保险费\s*[=＝]\s*([0-9.]+)\s*[*＊×xX]\s*年交保险费',
-        r'半年交保费\s*[=＝]\s*([0-9.]+)\s*[*＊×xX]\s*年交保费',
-        r'半年交保险费\s*[=＝]\s*年交保险费\s*[*＊×xX]\s*([0-9.]+)',
-        r'半年交保费\s*[=＝]\s*年交保费\s*[*＊×xX]\s*([0-9.]+)',
-        r'半年交保险费\s*[=＝]\s*([0-9.]+)\s*[*＊×xX]\s*年化保险费',
-        r'半年交保费\s*[=＝]\s*([0-9.]+)\s*[*＊×xX]\s*年化保费',
-        r'半年交保险费\s*[=＝]\s*年化保险费\s*[*＊×xX]\s*([0-9.]+)',
-        r'半年交保费\s*[=＝]\s*年化保费\s*[*＊×xX]\s*([0-9.]+)',
+        r'半年交保险费[=＝]\s*([0-9.]+)\s*[*×xX]\s*年交保险费',
+        r'半年交保费[=＝]\s*([0-9.]+)\s*[*×xX]\s*年交保费',
+        r'半年交保险费[=＝]\s*年交保险费[*×xX]\s*([0-9.]+)',
+        r'半年交保费[=＝]\s*年交保费[*×xX]\s*([0-9.]+)',
+        r'半年交保险费[=＝]\s*([0-9.]+)\s*[*×xX]\s*年化保险费',
+        r'半年交保费[=＝]\s*([0-9.]+)\s*[*×xX]\s*年化保费',
+        r'半年交保险费[=＝]\s*年化保险费[*×xX]\s*([0-9.]+)',
+        r'半年交保费[=＝]\s*年化保费[*×xX]\s*([0-9.]+)',
         r'半年交[0-9,，]+元保险费对应的基本保险金额[=＝]\s*年交[0-9,，]+元保险费对应的基本保险金额\s*÷\s*([0-9.]+)',
         r'半年交[0-9,，]+元保险费对应的基本保险金额[=＝]\s*年交[0-9,，]+元保险费对应的基本保险金额([0-9.]+)',
     ]
@@ -198,7 +181,7 @@ def get_write_text(textval, pdf_filename=None) -> None:
             payment_bases['半年缴基数'] = match.group(1)
             print(f"半年缴基数: {payment_bases['半年缴基数']}")
             break
-    
+
     print(f"payment_bases = {payment_bases}")
 
     if '保险金额对应的年交保险费' in textval:
@@ -223,5 +206,9 @@ def get_write_text(textval, pdf_filename=None) -> None:
         '半年缴基数': payment_bases['半年缴基数'],
         'premium_type': premium_type,
     }
-    
+
     print(f"\n配置数据: {config_data}")
+
+
+
+
