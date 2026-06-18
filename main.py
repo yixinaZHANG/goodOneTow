@@ -36,7 +36,6 @@ except ImportError as exc:  # pragma: no cover - environment guard
         "缺少依赖 pypdf，请先安装：pip install pypdf"
     ) from exc
 
-
 # 导入 get_content_vl 模块中的 get_write_text 方法
 try:
     from set_config import get_write_text
@@ -72,7 +71,6 @@ class RateTable:
     insurance_period: str | None = None
     sections: list["RateTable"] | None = None
     section_label: str = "保险期间"
-    notes: list[str] | None = None
 
 
 def fullwidth_to_halfwidth(text: str) -> str:
@@ -83,8 +81,6 @@ def fullwidth_to_halfwidth(text: str) -> str:
             chars.append(" ")
         elif 0xFF10 <= code <= 0xFF19:
             chars.append(chr(code - 0xFF10 + ord("0")))
-        elif code == 0x11:
-            chars.append(".")
         elif 0x13 <= code <= 0x1C:
             # Some embedded-font PDFs expose digits as C0 control codepoints
             # offset by 0x13: "\x13\x14\x15" means "012".
@@ -261,103 +257,18 @@ def open_pdf_reader(pdf_path: Path) -> PdfReader:
 def read_pdf_text(pdf_path: Path) -> str:
     reader = open_pdf_reader(pdf_path)
     page_texts = []
-    fitz_texts = read_pdf_text_with_fitz(pdf_path)
-    for page_index, page in enumerate(reader.pages):
+    for page in reader.pages:
         page_text = page.extract_text() or ""
-        if page_index < len(fitz_texts):
-            page_text = merge_page_text(page_text, fitz_texts[page_index])
-        else:
-            page_text = merge_page_text(page_text, read_pdf_text_with_pypdf_visitor(page))
         stop_positions = [
             position
             for marker in STOP_MARKERS
-            if (position := normalize_space(page_text).find(marker)) != -1
+            if (position := page_text.find(marker)) != -1
         ]
         if stop_positions:
             page_texts.append(page_text[: min(stop_positions)])
             break
         page_texts.append(page_text)
     return select_preferred_large_table_text("\n".join(page_texts))
-
-
-def read_pdf_text_with_pypdf_visitor(page) -> str:
-    items: list[str] = []
-
-    def visitor(text, cm, tm, font, size) -> None:
-        if text:
-            items.append(text)
-
-    try:
-        page.extract_text(visitor_text=visitor)
-    except Exception:
-        return ""
-    return "".join(items)
-
-
-def read_pdf_text_with_fitz(pdf_path: Path) -> list[str]:
-    try:
-        import fitz  # PyMuPDF
-    except ImportError:
-        return []
-
-    try:
-        document = fitz.open(str(pdf_path))
-    except Exception:
-        return []
-    return [page.get_text("text") or "" for page in document]
-
-
-def merge_page_text(primary_text: str, supplemental_text: str) -> str:
-    if not supplemental_text:
-        return primary_text
-    if not primary_text:
-        return supplemental_text
-
-    primary_line_set = {
-        normalize_space(line)
-        for line in primary_text.splitlines()
-        if normalize_space(line)
-    }
-    extra_lines = extract_supplemental_note_lines(supplemental_text, primary_line_set)
-    if not extra_lines:
-        return primary_text
-    return primary_text.rstrip() + "\n" + "\n".join(extra_lines)
-
-
-def extract_supplemental_note_lines(text: str, existing_lines: set[str]) -> list[str]:
-    lines = [normalize_space(line) for line in text.splitlines() if normalize_space(line)]
-    notes: list[str] = []
-    index = 0
-    while index < len(lines):
-        line = lines[index]
-        if not is_note_line(line):
-            index += 1
-            continue
-
-        combined = line
-        if index + 1 < len(lines) and is_note_continuation_line(lines[index + 1]):
-            combined = rebuild_note_formula(line, lines[index + 1])
-            index += 1
-
-        if combined not in existing_lines and combined not in notes:
-            notes.append(combined)
-        index += 1
-    return notes
-
-
-def is_note_line(line: str) -> bool:
-    return line.startswith(("注", "备注")) or "月交保费" in line or "月交保险费" in line
-
-
-def is_note_continuation_line(line: str) -> bool:
-    return "保费" in line or "保险费" in line
-
-
-def rebuild_note_formula(line: str, continuation: str) -> str:
-    match = re.match(r"^(注[：:]?\s*(?:月交保费|月交保险费))\s*([0-9.]+)\s*$", line)
-    if not match:
-        return f"{line}{continuation}"
-    return f"{match.group(1)}={match.group(2)}*{continuation}"
 
 
 def select_preferred_large_table_text(text: str) -> str:
@@ -1125,7 +1036,6 @@ def improve_table_with_fitz_word_rows(pdf_path: Path, table: RateTable) -> RateT
         columns=table.columns,
         rows=candidate_rows,
         insurance_period=table.insurance_period,
-        notes=table.notes,
     )
 
 
@@ -1475,23 +1385,7 @@ def parse_rate_table(text: str, allow_section_parsers: bool = True) -> RateTable
     if not rows:
         raise ValueError("未识别到年龄数据行。")
 
-    return RateTable(
-        columns=columns,
-        rows=rows,
-        insurance_period=extract_insurance_period(text),
-        notes=extract_notes(text),
-    )
-
-
-def extract_notes(text: str) -> list[str]:
-    notes: list[str] = []
-    for line in text.splitlines():
-        normalized = normalize_space(line)
-        if not normalized or not is_note_line(normalized):
-            continue
-        if normalized not in notes:
-            notes.append(normalized)
-    return notes
+    return RateTable(columns=columns, rows=rows, insurance_period=extract_insurance_period(text))
 
 
 def common_payment_periods(count: int) -> list[str]:
@@ -1875,8 +1769,6 @@ def build_output_rows(table: RateTable) -> list[list[str]]:
                 ],
             ]
         )
-    if table.notes:
-        output_rows.extend([note] for note in table.notes)
     return output_rows
 
 
